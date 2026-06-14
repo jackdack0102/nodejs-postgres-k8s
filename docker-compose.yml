@@ -1,0 +1,95 @@
+services:
+
+  vault:
+    image: hashicorp/vault
+
+    container_name: vault
+
+    cap_add:
+      - IPC_LOCK
+
+    ports:
+      - "8200:8200"
+
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_ROOT_TOKEN}
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+
+    command: server -dev
+
+  vault-init:
+    image: hashicorp/vault
+    depends_on:
+    - vault
+    environment:
+    VAULT_ADDR: http://vault:8200
+    VAULT_TOKEN: ${VAULT_ROOT_TOKEN}
+    DB_USERNAME: ${POSTGRES_USER}
+    DB_PASSWORD: ${POSTGRES_PASSWORD}
+
+    command: |
+      sh -c '
+      sleep 5 &&
+      vault secrets enable -version=2 kv || true &&
+      vault kv put secret/db \
+        username=$DB_USERNAME \
+        password=$DB_PASSWORD \
+        host=db \
+        database=devopsdb &&
+
+      vault secrets enable database || true &&
+      vault write database/config/postgres \
+        plugin_name=postgresql-database-plugin \
+        connection_url="postgresql://{{username}}:{{password}}@db:5432/devopsdb?sslmode=disable" \
+        allowed_roles="*" \
+        username="$DB_USERNAME" \
+        password="$DB_PASSWORD" &&
+
+      vault write database/roles/postgres-role \
+        db_name=postgres \
+        creation_statements="CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '"'"'{{password}}'"'"' VALID UNTIL '"'"'{{expiration}}'"'"'; GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO \"{{name}}\";" \
+        default_ttl="1h" \
+        max_ttl="24h" &&
+
+      echo "✓ Vault initialized"
+      '
+
+  db:
+    image: postgres:17
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: devopsdb
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./api
+      dockerfile: dockerfile
+
+    ports:
+      - "3000:3000"
+
+    environment:
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: ${VAULT_ROOT_TOKEN}
+
+    depends_on:
+      db:
+        condition: service_healthy
+      vault-init:
+        condition: service_completed_successfully
+
+  
+
+volumes:
+  postgres_data:
